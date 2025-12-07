@@ -7,7 +7,7 @@ A high-performance C++ HTTP server for routing queries using Contraction Hierarc
 A high-performance C++ routing engine based on Contraction Hierarchies. This server acts as the backend for the routing pipeline, handling shortest path computations efficiently.
 
 > [!NOTE]
-> This project is **Stage 4** of the [Routing Pipeline](../routing-pipeline) ecosystem. It serves the query engine built by `dijkstra-on-Hierarchy` via a REST API.
+> This project is **Stage 4** of the [Routing-Pipeline](https://github.com/khoshkhah/routing-pipeline) ecosystem. It serves the query engine built by [dijkstra-on-Hierarchy](https://github.com/khoshkhah/dijkstra-on-Hierarchy) via a REST API.
 
 ## Architecture
 
