@@ -1,0 +1,6 @@
+{
+  "port": 8080,
+  "host": "0.0.0.0",
+  "thread_count": 4,
+  "datasets_path": "../routing-pipeline/data"
+}
