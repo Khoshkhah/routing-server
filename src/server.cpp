@@ -113,6 +113,7 @@ RoutingServer::RoutingServer() : routing_engine_(std::make_unique<RoutingEngine>
     CROW_ROUTE(app_, "/health")([this]() { return handle_health_check(); });
     CROW_ROUTE(app_, "/route").methods("POST"_method)([this](const crow::request& req) { return handle_route(req); });
     CROW_ROUTE(app_, "/load_dataset").methods("POST"_method)([this](const crow::request& req) { return handle_load_dataset(req); });
+    CROW_ROUTE(app_, "/unload_dataset").methods("POST"_method)([this](const crow::request& req) { return handle_unload_dataset(req); });
 }
 
 void RoutingServer::load_config(const std::string& config_file) {
@@ -179,12 +180,20 @@ crow::response RoutingServer::handle_route(const crow::request& req) {
     }
 }
 
+
+
 crow::response RoutingServer::handle_load_dataset(const crow::request& req) {
     try {
         auto json_body = nlohmann::json::parse(req.body);
         std::string dataset = json_body["dataset"];
+        
+        std::string shortcuts_path = "";
+        std::string edges_path = "";
+        
+        if (json_body.contains("shortcuts_path")) shortcuts_path = json_body["shortcuts_path"];
+        if (json_body.contains("edges_path")) edges_path = json_body["edges_path"];
 
-        bool success = routing_engine_->load_dataset(dataset, config_.datasets_path);
+        bool success = routing_engine_->load_dataset(dataset, config_.datasets_path, shortcuts_path, edges_path);
 
         nlohmann::json response = {
             {"success", success},
@@ -192,6 +201,31 @@ crow::response RoutingServer::handle_load_dataset(const crow::request& req) {
         };
 
         return crow::response(success ? 200 : 400, response.dump());
+
+    } catch (const std::exception& e) {
+        nlohmann::json error_response = {
+            {"success", false},
+            {"error", e.what()}
+        };
+        return crow::response(400, error_response.dump());
+    }
+}
+
+crow::response RoutingServer::handle_unload_dataset(const crow::request& req) {
+    try {
+        auto json_body = nlohmann::json::parse(req.body);
+        std::string dataset = json_body["dataset"];
+
+        bool success = routing_engine_->unload_dataset(dataset);
+
+        // Idempotent: Return 200 even if it wasn't loaded, as the goal "ensure unloaded" is met.
+        nlohmann::json response = {
+            {"success", true},
+            {"dataset", dataset},
+            {"was_loaded", success}
+        };
+
+        return crow::response(200, response.dump());
 
     } catch (const std::exception& e) {
         nlohmann::json error_response = {

@@ -54,7 +54,26 @@ Load a dataset into memory. Idempotent (does nothing if already loaded).
 }
 ```
 
-### 3. `GET /nearest_edge` or `POST /nearest_edge`
+### 3. `POST /unload_dataset`
+Unload a dataset from memory. Idempotent (returns success even if already unloaded).
+
+**Request:**
+```json
+{
+  "dataset": "burnaby"
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "dataset": "burnaby",
+  "was_loaded": true
+}
+```
+
+### 4. `GET /nearest_edge` or `POST /nearest_edge`
 Find the single nearest roadmap edge to a coordinate.
  
 **GET Request:** `/nearest_edge?dataset=burnaby&lat=49.25&lon=-123.0`
@@ -78,7 +97,7 @@ Find the single nearest roadmap edge to a coordinate.
 }
 ```
  
-### 4. `GET /nearest_edges` or `POST /nearest_edges`
+### 5. `GET /nearest_edges` or `POST /nearest_edges`
 Find multiple nearest edges (k-Nearest Neighbors) within a radius.
  
 **GET Request:** `/nearest_edges?dataset=burnaby&lat=49.25&lon=-123.0&radius=500&max_candidates=5`
@@ -94,7 +113,7 @@ Find multiple nearest edges (k-Nearest Neighbors) within a radius.
 }
 ```
  
-### 5. `POST /route`
+### 6. `POST /route`
 Compute shortest path between two coordinates.
  
 **Request:**
@@ -116,6 +135,7 @@ Compute shortest path between two coordinates.
   "success": true,
   "route": {
     "distance": 1234.56,
+    "distance_meters": 5432.1,
     "runtime_ms": 2.3,
     "path": [1, 2, 3, 4, 5],
     "geojson": {
@@ -123,8 +143,18 @@ Compute shortest path between two coordinates.
       "geometry": {
         "type": "LineString",
         "coordinates": [[-123.456, 49.123], [-123.445, 49.134]]
+      },
+      "properties": {
+          "distance": 1234.56,
+          "length_meters": 5432.1
       }
     }
+  },
+  "timing_breakdown": {
+      "find_nearest_us": 12,
+      "search_us": 1500,
+      "expand_us": 40,
+      "geojson_us": 100
   }
 }
 ```

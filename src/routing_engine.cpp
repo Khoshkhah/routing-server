@@ -73,19 +73,30 @@ std::vector<std::string> parse_csv_line(const std::string& line) {
     return result;
 }
 
-bool RoutingEngine::load_dataset(const std::string& dataset_name, const std::string& datasets_path) {
+bool RoutingEngine::load_dataset(const std::string& dataset_name, const std::string& datasets_path,
+                                 const std::string& explicit_shortcuts_path,
+                                 const std::string& explicit_edges_path) {
     try {
-        std::string dataset_dir = datasets_path + "/" + dataset_name;
-        if (!fs::exists(dataset_dir)) {
-            std::cerr << "Dataset directory not found: " << dataset_dir << std::endl;
-            return false;
+        std::string shortcuts_path;
+        std::string edges_path;
+
+        if (!explicit_shortcuts_path.empty() && !explicit_edges_path.empty()) {
+            shortcuts_path = explicit_shortcuts_path;
+            edges_path = explicit_edges_path;
+        } else {
+            std::string dataset_dir = datasets_path + "/" + dataset_name;
+            if (!fs::exists(dataset_dir)) {
+                std::cerr << "Dataset directory not found: " << dataset_dir << std::endl;
+                return false;
+            }
+            shortcuts_path = dataset_dir + "/shortcuts.parquet";
+            edges_path = dataset_dir + "/edges.csv";
         }
 
-        std::string shortcuts_path = dataset_dir + "/shortcuts.parquet";
-        std::string edges_path = dataset_dir + "/edges.csv";
-
         if (!fs::exists(shortcuts_path) || !fs::exists(edges_path)) {
-            std::cerr << "Required files not found in " << dataset_dir << std::endl;
+            std::cerr << "Required files not found: " << std::endl;
+            std::cerr << "  Shortcuts: " << shortcuts_path << std::endl;
+            std::cerr << "  Edges: " << edges_path << std::endl;
             return false;
         }
 
@@ -164,6 +175,16 @@ bool RoutingEngine::load_dataset(const std::string& dataset_name, const std::str
     }
 }
 
+bool RoutingEngine::unload_dataset(const std::string& dataset_name) {
+    auto it = datasets_.find(dataset_name);
+    if (it != datasets_.end()) {
+        datasets_.erase(it);
+        std::cout << "Successfully unloaded dataset: " << dataset_name << std::endl;
+        return true;
+    }
+    return false;
+}
+
 std::vector<std::string> RoutingEngine::get_loaded_datasets() const {
     std::vector<std::string> names;
     for (const auto& pair : datasets_) {
@@ -238,9 +259,15 @@ nlohmann::json RoutingEngine::compute_route(
         }
         const auto& dataset = it->second;
 
+        // Timers
+        using clock = std::chrono::high_resolution_clock;
+        
         // 1. Find Nearest Edges
+        auto t1 = clock::now();
         auto start_results = find_nearest_edges_internal(dataset, start_lat, start_lng, search_radius, max_candidates);
         auto end_results = find_nearest_edges_internal(dataset, end_lat, end_lng, search_radius, max_candidates);
+        auto t2 = clock::now();
+        auto time_nearest_us = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
 
         if (start_results.empty() || end_results.empty()) {
             return {{"error", "No road found near start or end point"}, {"success", false}};
@@ -262,27 +289,59 @@ nlohmann::json RoutingEngine::compute_route(
         }
 
         // 2. Run Query
+        auto t3 = clock::now();
         auto result = dataset.graph.query_multi_optimized(source_edges, target_edges, source_dists, target_dists);
+        auto t4 = clock::now();
+        auto time_search_us = std::chrono::duration_cast<std::chrono::microseconds>(t4 - t3).count();
 
         if (!result.reachable) {
             return {{"error", "No path found"}, {"success", false}};
         }
 
         // 3. Expand Path
+        auto t5 = clock::now();
         auto expanded = dataset.graph.expand_shortcut_path(result.path);
+        auto t6 = clock::now();
+        auto time_expand_us = std::chrono::duration_cast<std::chrono::microseconds>(t6 - t5).count();
+
         if (!expanded.success) {
             return {{"error", "Failed to expand path"}, {"success", false}};
         }
 
-        // 4. Build GeoJSON
+        // Helper for distance
+        auto haversine_distance = [](double lat1, double lon1, double lat2, double lon2) {
+            constexpr double R = 6371000.0;
+            double dLat = (lat2 - lat1) * M_PI / 180.0;
+            double dLon = (lon2 - lon1) * M_PI / 180.0;
+            lat1 = lat1 * M_PI / 180.0;
+            lat2 = lat2 * M_PI / 180.0;
+            double a = std::sin(dLat / 2) * std::sin(dLat / 2) +
+                       std::sin(dLon / 2) * std::sin(dLon / 2) * std::cos(lat1) * std::cos(lat2);
+            double c = 2 * std::atan2(std::sqrt(a), std::sqrt(1 - a));
+            return R * c;
+        };
+
+        // 4. Build GeoJSON and Calculate Distance
+        auto t7 = clock::now();
         nlohmann::json coordinates = nlohmann::json::array();
+        double total_distance_meters = 0.0;
         
         for (const auto& edge_id : expanded.base_edges) {
             auto geom_it = dataset.edge_geometries.find(edge_id);
             if (geom_it != dataset.edge_geometries.end()) {
-                for (const auto& p : geom_it->second) {
+                const auto& points = geom_it->second;
+                if (points.empty()) continue;
+
+                for (size_t i = 0; i < points.size(); ++i) {
                     // p is {lat, lon}, GeoJSON needs [lon, lat]
-                    coordinates.push_back({p.second, p.first});
+                    coordinates.push_back({points[i].second, points[i].first});
+                    
+                    if (i > 0) {
+                        total_distance_meters += haversine_distance(
+                            points[i-1].first, points[i-1].second,
+                            points[i].first, points[i].second
+                        );
+                    }
                 }
             }
         }
@@ -294,17 +353,27 @@ nlohmann::json RoutingEngine::compute_route(
                 {"coordinates", coordinates}
             }},
             {"properties", {
-                {"distance", result.distance}
+                {"distance", result.distance}, // optimized cost (time)
+                {"length_meters", total_distance_meters} // physical distance
             }}
         };
+        auto t8 = clock::now();
+        auto time_geojson_us = std::chrono::duration_cast<std::chrono::microseconds>(t8 - t7).count();
 
         return {
             {"success", true},
             {"dataset", dataset_name},
             {"route", {
-                {"distance", result.distance},
+                {"distance", result.distance},         // Time/Cost
+                {"distance_meters", total_distance_meters}, // Physical Distance
                 {"path", expanded.base_edges},
                 {"geojson", geojson}
+            }},
+            {"timing_breakdown", {
+                {"find_nearest_us", time_nearest_us},
+                {"search_us", time_search_us},
+                {"expand_us", time_expand_us},
+                {"geojson_us", time_geojson_us}
             }}
         };
     } catch (const std::exception& e) {

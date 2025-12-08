@@ -33,7 +33,11 @@ public:
         std::unordered_map<uint32_t, std::vector<std::pair<double, double>>> edge_geometries; 
     };
 
-    bool load_dataset(const std::string& dataset_name, const std::string& datasets_path);
+    bool load_dataset(const std::string& dataset_name, const std::string& datasets_path,
+                      const std::string& explicit_shortcuts_path = "",
+                      const std::string& explicit_edges_path = "");
+    bool unload_dataset(const std::string& dataset_name);
+
     nlohmann::json compute_route(
         const std::string& dataset,
         double start_lat, double start_lng,
@@ -43,10 +47,6 @@ public:
     );
     std::vector<std::string> get_loaded_datasets() const;
 
-private:
-    std::unordered_map<std::string, Dataset> datasets_;
-
-    // Helper methods
     std::vector<std::pair<uint32_t, double>> find_nearest_edges(
         const std::string& dataset_name,
         double lat, double lng,
@@ -58,6 +58,12 @@ private:
         const std::string& dataset_name,
         double lat, double lng
     );
+
+private:
+    std::unordered_map<std::string, Dataset> datasets_;
+
+    // Helper methods
+    // Helper methods moved to public
 
     // Internal helper
     std::vector<std::pair<uint32_t, double>> find_nearest_edges_internal(

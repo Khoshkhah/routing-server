@@ -19,6 +19,7 @@ private:
     crow::response handle_health_check();
     crow::response handle_route(const crow::request& req);
     crow::response handle_load_dataset(const crow::request& req);
+    crow::response handle_unload_dataset(const crow::request& req);
 
     // Configuration
     struct Config {
