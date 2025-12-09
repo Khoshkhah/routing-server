@@ -155,9 +155,19 @@ Compute shortest path between two coordinates.
       "search_us": 1500,
       "expand_us": 40,
       "geojson_us": 100
+  },
+  "debug": {
+       "cells": {
+           "source": {"id": 613699780060643327, "res": 6, "boundary": [[...]]},
+           "target": {"id": 613699780024991743, "res": 6, "boundary": [[...]]},
+           "high": {"id": 604692580852039679, "res": 6, "boundary": [[...]]}
+       }
   }
 }
 ```
+
+> [!TIP]
+> **One-to-One Mode**: The routing engine now supports optimal point-to-point queries that utilize the full graph connectivity (including base edges) by relaxing hierarchy constraints for local searches.
 
 ## Building
 

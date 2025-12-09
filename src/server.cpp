@@ -157,11 +157,12 @@ crow::response RoutingServer::handle_route(const crow::request& req) {
         double end_lat = json_body["end_lat"];
         double end_lng = json_body["end_lng"];
         double search_radius = json_body.value("search_radius", 1000.0);
-        int max_candidates = json_body.value("max_candidates", 10);
+        int max_candidates = json_body.value("max_candidates", json_body.value("num_candidates", 10));
+        std::string mode = json_body.value("mode", "default");
 
         auto route = routing_engine_->compute_route(
             dataset, start_lat, start_lng, end_lat, end_lng,
-            search_radius, max_candidates
+            search_radius, max_candidates, mode
         );
 
         nlohmann::json response = {

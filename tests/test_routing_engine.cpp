@@ -25,6 +25,13 @@ TEST(RoutingEngineTest, RouteComputation) {
     EXPECT_TRUE(result.contains("error"));
 }
 
+TEST(RoutingEngineTest, RouteComputationOneToOne) {
+    RoutingEngine engine;
+    auto result = engine.compute_route("test", 0, 0, 1, 1, 1000, 5, "one_to_one");
+    EXPECT_FALSE(result["success"]);
+    EXPECT_TRUE(result.contains("error"));
+}
+
 int main(int argc, char **argv) {
     testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

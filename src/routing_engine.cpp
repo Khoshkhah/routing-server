@@ -1,4 +1,5 @@
 #include "routing_engine.hpp"
+#include "h3_utils.hpp"
 #include <filesystem>
 #include <iostream>
 #include <algorithm>
@@ -213,10 +214,15 @@ std::vector<std::pair<uint32_t, double>> RoutingEngine::find_nearest_edges_inter
                         std::back_inserter(rtree_results));
                         
     for (const auto& res : rtree_results) {
-        // Calculate simpler distance for now (from point to box center/edge approx)
-        // In reality, we should project point to line string
-        double dist = 0.0; // Placeholder for exact distance
-        results.push_back({res.second, dist});
+        // Calculate simpler distance (from point to box)
+        // Note: Coordinates are Lat/Lon but stored as Cartesian in R-tree.
+        // Result is Euclidean distance in degrees.
+        double dist_deg = bg::distance(Point(lng, lat), res.first);
+        
+        // Convert degrees to meters (approximate)
+        double dist_meters = dist_deg * 111320.0;
+        
+        results.push_back({res.second, dist_meters});
     }
     return results;
 }
@@ -250,7 +256,8 @@ nlohmann::json RoutingEngine::compute_route(
     double start_lat, double start_lng,
     double end_lat, double end_lng,
     double search_radius,
-    int max_candidates
+    int max_candidates,
+    const std::string& mode
 ) {
     try {
         auto it = datasets_.find(dataset_name);
@@ -260,39 +267,95 @@ nlohmann::json RoutingEngine::compute_route(
         const auto& dataset = it->second;
 
         // Timers
+        std::cout << "[DEBUG] Routing Engine v2 - Exposed Debug Info" << std::endl;
         using clock = std::chrono::high_resolution_clock;
         
-        // 1. Find Nearest Edges
-        auto t1 = clock::now();
-        auto start_results = find_nearest_edges_internal(dataset, start_lat, start_lng, search_radius, max_candidates);
-        auto end_results = find_nearest_edges_internal(dataset, end_lat, end_lng, search_radius, max_candidates);
-        auto t2 = clock::now();
-        auto time_nearest_us = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
+        QueryResult result;
+        std::vector<std::pair<uint32_t, double>> start_results;
+        std::vector<std::pair<uint32_t, double>> end_results;
+        long time_nearest_us = 0;
+        long time_search_us = 0;
 
-        if (start_results.empty() || end_results.empty()) {
-            return {{"error", "No road found near start or end point"}, {"success", false}};
+        if (mode == "one_to_one") {
+             // 1. Find Nearest Edge (One-to-One)
+            auto t1 = clock::now();
+            start_results = find_nearest_edges_internal(dataset, start_lat, start_lng, search_radius, 1);
+            end_results = find_nearest_edges_internal(dataset, end_lat, end_lng, search_radius, 1);
+            auto t2 = clock::now();
+            time_nearest_us = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
+
+            if (start_results.empty() || end_results.empty()) {
+                return {{"error", "No road found near start or end point"}, {"success", false}};
+            }
+
+            std::cout << "[OneToOne] Start Edge: " << start_results[0].first << " End Edge: " << end_results[0].first << std::endl;
+
+            // 2. Run Query using one-to-one algorithm with hierarchical filtering (explicit run_bidirectional)
+            auto t3 = clock::now();
+            
+            uint32_t start_edge = start_results[0].first;
+            uint32_t end_edge = end_results[0].first;
+
+            // Explicitly compute High Cell and Context
+            ShortcutGraph::HighCell high_cell = dataset.graph.compute_high_cell(start_edge, end_edge);
+            
+            std::cout << "[OneToOne] High Cell: " << high_cell.cell 
+                      << " Resolution: " << high_cell.res << std::endl;
+
+            ShortcutGraph::QueryContext ctx;
+            ctx.high_cell = high_cell;
+
+            result = dataset.graph.run_bidirectional(start_edge, end_edge, ctx);
+            
+            auto t4 = clock::now();
+            time_search_us = std::chrono::duration_cast<std::chrono::microseconds>(t4 - t3).count();
+            
+            // Add approach and egress times
+            if (result.reachable) {
+                const double ASSUMED_SPEED_MPS = 13.89;
+                double start_time = start_results[0].second / ASSUMED_SPEED_MPS;
+                double end_time = end_results[0].second / ASSUMED_SPEED_MPS;
+                result.distance += (start_time + end_time);
+            }
+
+        } else {
+            // 1. Find Nearest Edges (Many-to-Many)
+            auto t1 = clock::now();
+            start_results = find_nearest_edges_internal(dataset, start_lat, start_lng, search_radius, max_candidates);
+            end_results = find_nearest_edges_internal(dataset, end_lat, end_lng, search_radius, max_candidates);
+            auto t2 = clock::now();
+            time_nearest_us = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
+
+            if (start_results.empty() || end_results.empty()) {
+                return {{"error", "No road found near start or end point"}, {"success", false}};
+            }
+
+            // 2. Run Query - Use query_multi_optimized for all KNN queries
+            auto t3 = clock::now();
+            
+            // Prepare for query_multi_optimized
+            // Convert approach distance (meters) to estimated time (seconds) to avoid unit mismatch.
+            // Assuming urban speed of ~50 km/h = 13.89 m/s.
+            const double ASSUMED_SPEED_MPS = 13.89;
+
+            std::vector<uint32_t> source_edges;
+            std::vector<double> source_dists;
+            std::vector<uint32_t> target_edges;
+            std::vector<double> target_dists;
+
+            for (const auto& res : start_results) {
+                source_edges.push_back(res.first);
+                source_dists.push_back(res.second / ASSUMED_SPEED_MPS);
+            }
+            for (const auto& res : end_results) {
+                target_edges.push_back(res.first);
+                target_dists.push_back(res.second / ASSUMED_SPEED_MPS);
+            }
+
+            result = dataset.graph.query_multi_optimized(source_edges, target_edges, source_dists, target_dists);
+            auto t4 = clock::now();
+            time_search_us = std::chrono::duration_cast<std::chrono::microseconds>(t4 - t3).count();
         }
-
-        // Prepare for query_multi_optimized
-        std::vector<uint32_t> source_edges;
-        std::vector<double> source_dists;
-        std::vector<uint32_t> target_edges;
-        std::vector<double> target_dists;
-
-        for (const auto& res : start_results) {
-            source_edges.push_back(res.first);
-            source_dists.push_back(res.second);
-        }
-        for (const auto& res : end_results) {
-            target_edges.push_back(res.first);
-            target_dists.push_back(res.second);
-        }
-
-        // 2. Run Query
-        auto t3 = clock::now();
-        auto result = dataset.graph.query_multi_optimized(source_edges, target_edges, source_dists, target_dists);
-        auto t4 = clock::now();
-        auto time_search_us = std::chrono::duration_cast<std::chrono::microseconds>(t4 - t3).count();
 
         if (!result.reachable) {
             return {{"error", "No path found"}, {"success", false}};
@@ -360,7 +423,7 @@ nlohmann::json RoutingEngine::compute_route(
         auto t8 = clock::now();
         auto time_geojson_us = std::chrono::duration_cast<std::chrono::microseconds>(t8 - t7).count();
 
-        return {
+        nlohmann::json response = {
             {"success", true},
             {"dataset", dataset_name},
             {"route", {
@@ -374,8 +437,99 @@ nlohmann::json RoutingEngine::compute_route(
                 {"search_us", time_search_us},
                 {"expand_us", time_expand_us},
                 {"geojson_us", time_geojson_us}
+            }},
+            {"debug", {
+                {"source_candidates", nlohmann::json::array()},
+                {"target_candidates", nlohmann::json::array()},
+                {"shortcuts", nlohmann::json::array()},
+                {"cells", nlohmann::json::object()}
             }}
         };
+
+        // Populate cell visualization (for ALL modes if path exists)
+        if (!expanded.base_edges.empty()) {
+            uint32_t s_edge = expanded.base_edges.front();
+            uint32_t t_edge = expanded.base_edges.back();
+            
+            // Recompute high cell for visualization
+            ShortcutGraph::HighCell high = dataset.graph.compute_high_cell(s_edge, t_edge);
+            
+            // Helper: Resolve cell for edge
+            auto resolve_cell = [&](uint32_t edge, double lat, double lng) -> std::pair<uint64_t, int> {
+                auto meta = dataset.graph.get_edge_meta(edge);
+                uint64_t cell = meta.incoming_cell;
+                if (cell == 0) cell = meta.outgoing_cell;
+                
+                int res = meta.lca_res;
+                if (res == -1) res = 8; // Default to 8 if no LCA res (base level)
+
+                // If we have a valid cell, reduce to the target resolution
+                if (cell != 0) {
+                    if (h3_resolution(cell) > res) {
+                         cell = h3_find_ancestor(cell, res);
+                    }
+                } else {
+                    // Fallback to coordinate lookup at the target resolution
+                    cell = h3_lat_lng_to_cell(lat, lng, res);
+                }
+                return {cell, res};
+            };
+            
+            auto [s_cell, s_res] = resolve_cell(s_edge, start_lat, start_lng);
+            auto [t_cell, t_res] = resolve_cell(t_edge, end_lat, end_lng);
+
+            // Populate debug response
+            auto to_json_boundary = [](const std::vector<std::pair<double, double>>& boundary) {
+                nlohmann::json json_boundary = nlohmann::json::array();
+                for (const auto& p : boundary) {
+                     // GeoJSON format: [lon, lat]
+                    json_boundary.push_back({p.second, p.first});
+                }
+                return json_boundary;
+            };
+
+            response["debug"]["cells"]["source"]["id"] = s_cell;
+            response["debug"]["cells"]["source"]["res"] = h3_resolution(s_cell);
+            response["debug"]["cells"]["source"]["boundary"] = to_json_boundary(h3_cell_boundary(s_cell));
+
+            response["debug"]["cells"]["target"]["id"] = t_cell;
+            response["debug"]["cells"]["target"]["res"] = h3_resolution(t_cell);
+            response["debug"]["cells"]["target"]["boundary"] = to_json_boundary(h3_cell_boundary(t_cell));
+            
+            response["debug"]["cells"]["high"]["id"] = high.cell;
+            response["debug"]["cells"]["high"]["res"] = high.res;
+            response["debug"]["cells"]["high"]["boundary"] = to_json_boundary(h3_cell_boundary(high.cell));
+        }
+
+        // Populate shortcut debug info
+        auto shortcuts_debug = dataset.graph.get_path_debug_info(result.path);
+        for (const auto& sc : shortcuts_debug) {
+            response["debug"]["shortcuts"].push_back({
+                {"from", sc.from},
+                {"to", sc.to},
+                {"cell", sc.cell},
+                {"res", sc.res}
+            });
+        }
+
+        // Populate debug candidates
+        const double DEBUG_SPEED = 13.89;
+        for (const auto& kv : start_results) {
+            response["debug"]["source_candidates"].push_back({
+                {"edge_id", kv.first},
+                {"dist_m", kv.second},
+                {"dist_s", kv.second / DEBUG_SPEED}
+            });
+        }
+        for (const auto& kv : end_results) {
+            response["debug"]["target_candidates"].push_back({
+                {"edge_id", kv.first},
+                {"dist_m", kv.second},
+                {"dist_s", kv.second / DEBUG_SPEED}
+            });
+        }
+
+        return response;
     } catch (const std::exception& e) {
         return {
             {"success", false},

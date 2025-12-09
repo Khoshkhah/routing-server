@@ -43,7 +43,8 @@ public:
         double start_lat, double start_lng,
         double end_lat, double end_lng,
         double search_radius = 1000.0,
-        int max_candidates = 10
+        int max_candidates = 10,
+        const std::string& mode = "default"
     );
     std::vector<std::string> get_loaded_datasets() const;
 
